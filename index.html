@@ -1,0 +1,350 @@
+<!DOCTYPE html>
+<html>
+<meta charset="UTF-8">
+<title>LaserGRBL Test Card generator — improved</title>
+
+<style type="text/css">
+body {
+    margin: 0;
+    font: 13px -apple-system, BlinkMacSystemFont, "Segoe UI", Arial, sans-serif;
+    background: #f4f4f6;
+    color: #222;
+}
+.wrap {
+    display: grid;
+    grid-template-columns: 320px 1fr 360px;
+    gap: 16px;
+    padding: 16px;
+    align-items: start;
+}
+.panel {
+    background: #fff;
+    border: 1px solid #e3e3e8;
+    border-radius: 8px;
+    padding: 14px 16px;
+    box-shadow: 0 1px 2px rgba(0,0,0,0.04);
+}
+.panel h2 {
+    margin: 0 0 12px 0;
+    font-size: 14px;
+    font-weight: 700;
+    letter-spacing: 0.02em;
+    text-transform: uppercase;
+    color: #555;
+}
+.grid2 { display: grid; grid-template-columns: 1fr 1fr; gap: 8px 10px; }
+.field { display: flex; flex-direction: column; gap: 3px; margin-bottom: 8px; }
+.field label { font-size: 11px; color: #666; font-weight: 600; }
+.field input[type=number] {
+    padding: 6px 8px;
+    border: 1px solid #d0d0d6;
+    border-radius: 5px;
+    font: inherit;
+    width: 100%;
+    box-sizing: border-box;
+}
+.check { display: flex; align-items: center; gap: 8px; margin: 4px 0 10px; }
+canvas {
+    background: #fff;
+    border: 1px solid #c0c0c8;
+    border-radius: 6px;
+    display: block;
+    max-width: 100%;
+    height: auto;
+    cursor: pointer;
+}
+.canvas-wrap { text-align: center; }
+.hint { font-size: 11px; color: #888; margin-top: 8px; text-align: center; }
+textarea {
+    width: 100%;
+    box-sizing: border-box;
+    font: 11px "SF Mono", Menlo, Consolas, monospace;
+    border: 1px solid #d0d0d6;
+    border-radius: 5px;
+    padding: 8px;
+    min-height: 480px;
+    resize: vertical;
+}
+button.dl {
+    width: 100%;
+    margin-top: 8px;
+    padding: 8px 12px;
+    background: #1f6feb;
+    color: #fff;
+    border: 0;
+    border-radius: 5px;
+    font: 600 12px inherit;
+    cursor: pointer;
+}
+button.dl:hover { background: #1856c4; }
+</style>
+
+<body onload="DrawAll()">
+
+<div class="wrap">
+
+    <form class="panel" onchange="DrawAll()" oninput="DrawAll()">
+        <h2>Card</h2>
+        <div class="grid2">
+            <div class="field"><label for="SX">Size X (mm)</label><input type="number" id="SX" value="67" min="10" step="1"></div>
+            <div class="field"><label for="SY">Size Y (mm)</label><input type="number" id="SY" value="58" min="10" step="1"></div>
+            <div class="field"><label for="NX">Columns / X</label><input type="number" id="NX" value="7" min="1" max="40" step="1"></div>
+            <div class="field"><label for="NY">Rows / Y</label><input type="number" id="NY" value="8" min="1" max="40" step="1"></div>
+        </div>
+
+        <h2 style="margin-top:14px">Speed (rows)</h2>
+        <div class="grid2">
+            <div class="field"><label for="SpMin">Min mm/min</label><input type="number" id="SpMin" value="1000" step="50"></div>
+            <div class="field"><label for="SpMax">Max mm/min</label><input type="number" id="SpMax" value="3000" step="50"></div>
+        </div>
+
+        <h2 style="margin-top:14px">Power (columns)</h2>
+        <div class="grid2">
+            <div class="field"><label for="PwMin">Min (0–1000)</label><input type="number" id="PwMin" value="100" min="0" max="1000"></div>
+            <div class="field"><label for="PwMax">Max (0–1000)</label><input type="number" id="PwMax" value="1000" min="0" max="1000"></div>
+        </div>
+
+        <h2 style="margin-top:14px">Fill</h2>
+        <div class="check">
+            <input type="checkbox" id="Fil">
+            <label for="Fil">Filled cells</label>
+        </div>
+        <div class="field">
+            <label for="Rsl">Filling resolution (lines/mm)</label>
+            <input type="number" id="Rsl" value="20" min="1" max="100">
+        </div>
+    </form>
+
+    <div class="panel canvas-wrap">
+        <h2 style="text-align:left">Preview</h2>
+        <canvas id="myCanvas" width="600" height="500" onclick="download('TestCard.nc')"></canvas>
+        <div class="hint">Click the preview to download G-code</div>
+    </div>
+
+    <div class="panel">
+        <h2>G-code</h2>
+        <textarea id="GCode" wrap="off" readonly></textarea>
+        <button class="dl" type="button" onclick="download('TestCard.nc')">Download .nc</button>
+    </div>
+
+</div>
+
+<script>
+// ---------- config ----------
+const PREVIEW_MAX_PX = 720;     // max canvas pixel dimension; scale chosen to fit
+const MARGIN_LEFT   = 9;        // mm reserved for Y (speed) labels
+const MARGIN_TOP    = 6;        // mm reserved for X (power) labels
+const MARGIN_RIGHT  = 1.5;
+const MARGIN_BOTTOM = 1.5;
+const CELL_GAP      = 0.4;      // mm between cells
+
+const header = "G90\r\nG0 X0 Y0\r\nM4 S0\r\n";
+const footer = "M5\r\nG0 X0 Y0\r\nM30";
+
+// ---------- state ----------
+let F;            // feed (used by Write fallback)
+let ColorS;
+let GCode;
+
+const canvas = document.getElementById("myCanvas");
+const ctx = canvas.getContext("2d");
+
+const val = id => Number(document.getElementById(id).value);
+
+// ---------- main ----------
+function DrawAll(){
+    const SX = val("SX"), SY = val("SY");
+    const NX = Math.max(1, val("NX")), NY = Math.max(1, val("NY"));
+
+    // pick a screen scale that fits the preview box
+    const ScreenScale = Math.max(2, Math.min(PREVIEW_MAX_PX / SX, PREVIEW_MAX_PX / SY));
+
+    // grid geometry (all in mm)
+    const gridX0 = MARGIN_LEFT;
+    const gridY0 = MARGIN_TOP;
+    const gridW = SX - MARGIN_LEFT - MARGIN_RIGHT;
+    const gridH = SY - MARGIN_TOP - MARGIN_BOTTOM;
+    const cellW = (gridW - CELL_GAP * (NX - 1)) / NX;
+    const cellH = (gridH - CELL_GAP * (NY - 1)) / NY;
+
+    // canvas reset + sizing
+    ctx.setTransform(1, 0, 0, 1, 0, 0);
+    ctx.canvas.width  = Math.round(SX * ScreenScale);
+    ctx.canvas.height = Math.round(SY * ScreenScale);
+    ctx.clearRect(0, 0, ctx.canvas.width, ctx.canvas.height);
+    ctx.scale(ScreenScale, ScreenScale);
+
+    // card background
+    ctx.fillStyle = "#fafafa";
+    ctx.fillRect(0, 0, SX, SY);
+
+    // card outline
+    ctx.strokeStyle = "#cfcfd6";
+    ctx.lineWidth = 0.15;
+    ctx.strokeRect(0.1, 0.1, SX - 0.2, SY - 0.2);
+
+    GCode = header;
+
+    AnnotateAxes(NX, NY, SX, SY, gridX0, gridY0, cellW, cellH);
+    DrawCells(NX, NY, SX, SY, gridX0, gridY0, cellW, cellH);
+
+    GCode += footer;
+    document.getElementById("GCode").value = GCode;
+}
+
+function DrawCells(NX, NY, SX, SY, gridX0, gridY0, cellW, cellH){
+    const SpMin = val("SpMin"), SpMax = val("SpMax");
+    const PwMin = val("PwMin"), PwMax = val("PwMax");
+    const filled = document.getElementById("Fil").checked;
+    const Rsl = val("Rsl");
+
+    for (let yi = 0; yi < NY; yi++){
+        F = Math.floor(SpMax - yi * ((SpMax - SpMin) / Math.max(1, NY - 1)));
+        for (let xi = 0; xi < NX; xi++){
+            const PWR = Math.floor(PwMin + xi * ((PwMax - PwMin) / Math.max(1, NX - 1)));
+            const x = gridX0 + xi * (cellW + CELL_GAP);
+            const y = gridY0 + yi * (cellH + CELL_GAP);
+            DrawCell(x, y, cellW, cellH, PWR, F, SY, filled, Rsl);
+        }
+    }
+}
+
+function DrawCell(X, Y, W, H, S, F, SY, filled, Rsl){
+    Color(S);
+
+    if (filled){
+        ctx.fillStyle = ColorS;
+        ctx.fillRect(X, Y, W, H);
+
+        // scanlines, machine Y = SY - canvas Y, bottom edge first
+        const lines = Math.max(1, Math.floor(Rsl * H));
+        const Ystep = 1 / Rsl;
+        let Ym = SY - (Y + H);
+        GCode += "G00 X" + X.toFixed(3) + " Y" + Ym.toFixed(3) + "\r\nS " + S + "\r\nF " + F + "\r\n";
+        for (let i = 0; i < lines; i++){
+            GCode += "G01 X" + (X + W).toFixed(3) + "\r\n";
+            Ym += Ystep;
+            GCode += "G00 X" + X.toFixed(3) + " Y" + Ym.toFixed(3) + "\r\n";
+        }
+        GCode += "S0\r\n";
+    } else {
+        ctx.lineWidth = Math.max(0.12, Math.min(W, H) * 0.06);
+        ctx.strokeStyle = ColorS;
+        ctx.strokeRect(X, Y, W, H);
+
+        const Ym = SY - (Y + H);
+        GCode += "G00 X" + X.toFixed(3) + " Y" + Ym.toFixed(3) + "\r\nS " + S + "\r\nF " + F + "\r\n";
+        GCode += "G01 X" + (X + W).toFixed(3) + "\r\n";
+        GCode += "G01 Y" + (Ym + H).toFixed(3) + "\r\n";
+        GCode += "G01 X" + X.toFixed(3) + "\r\n";
+        GCode += "G01 Y" + Ym.toFixed(3) + "\r\n";
+        GCode += "S0\r\n";
+    }
+}
+
+function Color(S){
+    const CLR = Math.max(0, Math.min(255, Math.floor((1000 - S) * 255 / 1000)));
+    const hex = CLR.toString(16).padStart(2, "0");
+    ColorS = "#" + hex + hex + hex;
+}
+
+function AnnotateAxes(NX, NY, SX, SY, gridX0, gridY0, cellW, cellH){
+    ctx.fillStyle = "#222";
+
+    // axis titles
+    const titleFont = Math.max(1.6, Math.min(MARGIN_TOP * 0.45, 2.6));
+    ctx.font = "bold " + titleFont.toFixed(2) + "px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "top";
+    ctx.fillText("Power →", gridX0 + (SX - MARGIN_LEFT - MARGIN_RIGHT) / 2, 0.4);
+
+    ctx.save();
+    ctx.translate(0.6, gridY0 + (SY - MARGIN_TOP - MARGIN_BOTTOM) / 2);
+    ctx.rotate(-Math.PI / 2);
+    ctx.textBaseline = "top";
+    ctx.fillText("Speed →", 0, 0);
+    ctx.restore();
+
+    // column labels (Power) — scale font to fit cell width
+    const colFont = clamp(cellW * 0.34, 1.3, 3.0);
+    ctx.font = colFont.toFixed(2) + "px Arial";
+    ctx.textAlign = "center";
+    ctx.textBaseline = "bottom";
+    for (let xi = 0; xi < NX; xi++){
+        const PWR = Math.floor(val("PwMin") + xi * ((val("PwMax") - val("PwMin")) / Math.max(1, NX - 1)));
+        const cx = gridX0 + xi * (cellW + CELL_GAP) + cellW / 2;
+        ctx.fillText(PWR, cx, gridY0 - 0.3);
+        // engrave power label at top of card
+        Write(cx - colFont * 0.8, SY - 0.5, PWR);
+    }
+
+    // row labels (Speed) — scale font to fit cell height & left margin
+    const rowFont = clamp(Math.min(cellH * 0.34, MARGIN_LEFT * 0.32), 1.3, 3.0);
+    ctx.font = rowFont.toFixed(2) + "px Arial";
+    ctx.textAlign = "right";
+    ctx.textBaseline = "middle";
+    for (let yi = 0; yi < NY; yi++){
+        const Fv = Math.floor(val("SpMax") - yi * ((val("SpMax") - val("SpMin")) / Math.max(1, NY - 1)));
+        const cy = gridY0 + yi * (cellH + CELL_GAP) + cellH / 2;
+        ctx.fillText(Fv, gridX0 - 0.4, cy);
+        // engrave speed label on left edge
+        Write(0.5, SY - cy - rowFont * 0.4, Fv);
+    }
+
+    ctx.textAlign = "start";
+    ctx.textBaseline = "alphabetic";
+}
+
+function clamp(v, lo, hi){ return Math.max(lo, Math.min(hi, v)); }
+
+// ---------- download ----------
+function download(filename){
+    const a = document.createElement("a");
+    a.href = "data:text/plain;charset=utf-8," + encodeURIComponent(document.getElementById("GCode").value);
+    a.download = filename;
+    a.style.display = "none";
+    document.body.appendChild(a);
+    a.click();
+    document.body.removeChild(a);
+}
+
+// ---------- vector text for G-code (Hershey-ish digits) ----------
+function Write(X, Y, Num){
+    const scale = 0.08;
+    const s = String(Num);
+    let Xt = X;
+    const Yt = Y;
+    for (let i = 0; i < s.length; i++){
+        const path = LetterToLines(s[i]);
+        if (!path) { Xt += 20 * scale; continue; }
+        const pts = path.split(" ");
+        pts.forEach((item, index) => {
+            const p = item.split(",");
+            const fast = (index === 0 || p[2] === "1") ? "0" : "1";
+            GCode += "G0" + fast +
+                     " X" + (Xt + Number(p[0]) * scale).toFixed(3) +
+                     " Y" + (Yt + Number(p[1]) * scale).toFixed(3) +
+                     "\r\nS500\r\nF 1000\r\n";
+        });
+        Xt += 20 * scale;
+    }
+}
+
+function LetterToLines(A){
+    switch (A){
+        case "0": return "9,21 6,20 4,17 3,12 3,9 4,4 6,1 9,0 11,0 14,1 16,4 17,9 17,12 16,17 14,20 11,21 9,21";
+        case "1": return "8,17 11,21 11,0";
+        case "2": return "4,16 4,17 5,19 6,20 8,21 12,21 14,20 15,19 16,17 16,15 15,13 13,10 3,0 17,0";
+        case "3": return "5,21 16,21 10,13 13,13 15,12 16,11 17,8 17,6 16,3 14,1 11,0 8,0 5,1 4,2 3,4";
+        case "4": return "7,21 3,7 18,7 16,21,1 14,0";
+        case "5": return "15,21 5,21 4,12 5,13 8,14 11,14 14,13 16,11 17,8 17,6 16,3 14,1 11,0 8,0 5,1 4,2 3,4";
+        case "6": return "15,20 12,21 10,21 7,20 5,17 4,12 4,7 5,3 7,1 10,0 11,0 14,1 16,3 17,6 17,7 16,10 14,12 11,13 10,13 7,12 5,10 4,7";
+        case "7": return "17,21 7,0 3,21,1 17,21";
+        case "8": return "8,21 5,20 4,18 4,16 5,14 7,13 11,12 14,11 16,9 17,7 17,4 16,2 15,1 12,0 8,0 5,1 4,2 3,4 3,7 4,9 6,11 9,12 13,13 15,14 16,16 16,18 15,20 12,21 8,21";
+        case "9": return "16,14 15,11 13,9 10,8 9,8 6,9 4,11 3,14 3,15 4,18 6,20 9,21 10,21 13,20 15,18 16,14 16,9 15,4 13,1 10,0 8,0 5,1 4,3";
+    }
+    return null;
+}
+</script>
+</body>
+</html>
